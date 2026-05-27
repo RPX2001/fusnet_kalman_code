@@ -83,11 +83,12 @@ def main(config_path: str = "config.json"):
         initial_covariance=float(kal_cfg.get("initial_covariance", 1e-2)),
     )
     if mode == "full":
-        kf = FullKalmanCorrectionReTM(**common_kwargs)
+        kf = FullKalmanCorrectionReTM(**common_kwargs, device=device)
     elif mode == "block":
         kf = BlockKalmanCorrectionReTM(
             **common_kwargs,
             block_size=int(kal_cfg.get("block_size", 128)),
+            device=device,
         )
     else:
         raise ValueError("kalman.mode must be 'full' or 'block'")
