@@ -1,0 +1,32 @@
+{
+  "data": {
+    "seq_dir": "/home/jaliya/eeg_speech/Julian/RetM_Workspace/Dataset/ReTM recordings/Table 1 - Training/Test/test_dataset_A1/sample_26",
+    "out_dir": "outputs/fusnet_kalman_seq001",
+    "fs": 16000,
+    "normalize": true,
+    "qa_mics": [1, 2, 3],
+    "qb_mics": [4, 5, 6, 7]
+  },
+  "fusnet": {
+    "checkpoint": "/home/jaliya/eeg_speech/Julian/RetM_Workspace/ReTM_Research_Project/checkpoint_AWGN_FUSENet_7.pth",
+    "context": 4096,
+    "window_size": 16384,
+    "stride": 8192,
+    "batch_size": 8,
+    "device": "cuda"
+  },
+  "kalman": {
+    "mode": "full",
+    "L": 128,
+    "block_size": 128,
+    "transition": 0.995,
+    "process_noise": 1.0e-7,
+    "observation_noise": 1.0e-3,
+    "initial_covariance": 1.0e-2
+  },
+  "outputs": {
+    "save_wav": true,
+    "save_npy": true
+  }
+}
+
