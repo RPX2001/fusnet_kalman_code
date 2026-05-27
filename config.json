@@ -16,8 +16,8 @@
     "device": "cuda"
   },
   "kalman": {
-    "mode": "full",
-    "L": 128,
+    "mode": "block",
+    "L": 1024,
     "block_size": 128,
     "transition": 0.995,
     "process_noise": 1.0e-7,
