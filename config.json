@@ -1,14 +1,17 @@
 {
   "data": {
-    "seq_dir": "/home/jaliya/eeg_speech/Julian/RetM_Workspace/Dataset/ReTM recordings/Table 1 - Training/Test/test_dataset_A1/sample_26",
+    "seq_dir": "/home/jaliya/eeg_speech/Julian/RetM_Workspace/Dataset/BRUDEX_12/static/A1_Test/seq_020",
     "out_dir": "outputs/fusnet_kalman_seq001",
     "fs": 16000,
     "normalize": true,
-    "qa_mics": [1, 2, 3],
-    "qb_mics": [4, 5, 6, 7]
+    "qa_mics": [1, 2, 3, 4, 5],
+    "qb_mics": [6, 7, 8, 9, 10, 11, 12]
+  },
+  "system": {
+    "mic_config": 12
   },
   "fusnet": {
-    "checkpoint": "/home/jaliya/eeg_speech/Julian/RetM_Workspace/ReTM_Research_Project/checkpoint_AWGN_FUSENet_7.pth",
+    "checkpoint": "/home/jaliya/eeg_speech/Julian/RetM_Workspace/ReTM_Research_Project/checkpoint_12_0.pth",
     "context": 4096,
     "window_size": 16384,
     "stride": 8192,

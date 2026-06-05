@@ -5,9 +5,6 @@ import numpy as np
 
 from retm_kalman.io_utils import read_mic_wavs, normalize_pair, write_mic_wavs
 from retm_kalman.metrics import print_basic_metrics, sdr_db, mse_db
-from retm_kalman.fusnet_inference import load_fusnet7_model, predict_fusnet7_original_style
-from retm_kalman.kalman_full import FullKalmanCorrectionReTM
-from retm_kalman.kalman_block import BlockKalmanCorrectionReTM
 
 def load_config(path: str | Path = "config.json") -> dict:
     path = Path(path)
@@ -20,10 +17,40 @@ def load_config(path: str | Path = "config.json") -> dict:
 def main(config_path: str = "config.json"):
     cfg = load_config(config_path)
 
+    system_cfg = cfg.get("system", {})
     data_cfg = cfg["data"]
     fus_cfg = cfg["fusnet"]
     kal_cfg = cfg["kalman"]
     out_cfg = cfg.get("outputs", {})
+
+    mic_config = int(system_cfg.get("mic_config", 7))
+    profile_defaults = {
+        7: {
+            "qa_mics": (1, 2, 3),
+            "qb_mics": (4, 5, 6, 7),
+        },
+        12: {
+            "qa_mics": (1, 2, 3, 4, 5),
+            "qb_mics": (6, 7, 8, 9, 10, 11, 12),
+        },
+    }
+    if mic_config not in profile_defaults:
+        raise ValueError("system.mic_config must be 7 or 12")
+
+    if mic_config == 12:
+        from retm_kalman.fusnet_inference_12 import (
+            load_fusnet12_model as load_fusnet_model,
+            predict_fusnet12_original_style as predict_fusnet,
+        )
+        from retm_kalman.kalman_full_12 import FullKalmanCorrectionReTM
+        from retm_kalman.kalman_block_12 import BlockKalmanCorrectionReTM
+    else:
+        from retm_kalman.fusnet_inference import (
+            load_fusnet7_model as load_fusnet_model,
+            predict_fusnet7_original_style as predict_fusnet,
+        )
+        from retm_kalman.kalman_full import FullKalmanCorrectionReTM
+        from retm_kalman.kalman_block import BlockKalmanCorrectionReTM
 
     seq_dir = Path(data_cfg["seq_dir"])
     out_dir = Path(data_cfg["out_dir"])
@@ -32,16 +59,26 @@ def main(config_path: str = "config.json"):
     print("=" * 80)
     print("FuSNet + Kalman Dynamic ReTM Correction System")
     print("=" * 80)
+    print(f"Mic config: {mic_config}-mic")
     print(f"Sequence : {seq_dir}")
     print(f"Output   : {out_dir}")
     print(f"Mode     : {kal_cfg['mode']}")
 
     print("\n[1] Loading microphone WAV files...")
+    default_qa_mics = profile_defaults[mic_config]["qa_mics"]
+    default_qb_mics = profile_defaults[mic_config]["qb_mics"]
+    qa_mics = tuple(data_cfg.get("qa_mics", default_qa_mics))
+    qb_mics = tuple(data_cfg.get("qb_mics", default_qb_mics))
+    if len(qa_mics) != len(default_qa_mics) or len(qb_mics) != len(default_qb_mics):
+        raise ValueError(
+            f"For mic_config={mic_config}, expected {len(default_qa_mics)} QA mics and {len(default_qb_mics)} QB mics, "
+            f"got QA={len(qa_mics)} QB={len(qb_mics)}"
+        )
     mA, mB, fs = read_mic_wavs(
         seq_dir,
         fs_target=int(data_cfg.get("fs", 16000)),
-        qa_mics=tuple(data_cfg.get("qa_mics", [1, 2, 3])),
-        qb_mics=tuple(data_cfg.get("qb_mics", [4, 5, 6, 7])),
+        qa_mics=qa_mics,
+        qb_mics=qb_mics,
     )
     print(f"mA shape: {mA.shape}, mB shape: {mB.shape}, fs={fs}")
 
@@ -51,14 +88,14 @@ def main(config_path: str = "config.json"):
         print(f"Normalized by global peak = {scale:.8f}")
 
     print("\n[2] Loading integrated FuSNet model...")
-    model, device = load_fusnet7_model(
+    model, device = load_fusnet_model(
         checkpoint_path=fus_cfg["checkpoint"],
         context=int(fus_cfg.get("context", 4096)),
         device=fus_cfg.get("device", "cuda"),
     )
 
     print("\n[3] Running FuSNet initial Group-A estimation...")
-    mA_f = predict_fusnet7_original_style(
+    mA_f = predict_fusnet(
         model=model,
         mB=mB,
         context=int(fus_cfg.get("context", 4096)),
