@@ -1,15 +1,16 @@
 from __future__ import annotations
-from .kalman_block import BlockKalmanCorrectionReTM as _BaseBlockKalmanCorrectionReTM
 
-class BlockKalmanCorrectionReTM(_BaseBlockKalmanCorrectionReTM):
-    """12-mic default wrapper for the block Kalman correction model."""
+from .kalman_full import FullKalmanCorrectionReTM as _BaseFullKalmanCorrectionReTM
+
+
+class FullKalmanCorrectionReTM(_BaseFullKalmanCorrectionReTM):
+    """13-mic default wrapper for the full Kalman correction model."""
 
     def __init__(
         self,
-        qb: int = 7,
+        qb: int = 8,
         qa: int = 5,
-        L: int = 1024,
-        block_size: int = 128,
+        L: int = 256,
         transition: float = 0.995,
         process_noise: float = 1e-7,
         observation_noise: float = 1e-3,
@@ -25,7 +26,6 @@ class BlockKalmanCorrectionReTM(_BaseBlockKalmanCorrectionReTM):
             qb=qb,
             qa=qa,
             L=L,
-            block_size=block_size,
             transition=transition,
             process_noise=process_noise,
             observation_noise=observation_noise,

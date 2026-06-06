@@ -33,11 +33,22 @@ def main(config_path: str = "config.json"):
             "qa_mics": (1, 2, 3, 4, 5),
             "qb_mics": (6, 7, 8, 9, 10, 11, 12),
         },
+        13: {
+            "qa_mics": (1, 2, 3, 4, 5),
+            "qb_mics": (6, 7, 8, 9, 10, 11, 12, 13),
+        },
     }
     if mic_config not in profile_defaults:
-        raise ValueError("system.mic_config must be 7 or 12")
+        raise ValueError("system.mic_config must be 7, 12, or 13")
 
-    if mic_config == 12:
+    if mic_config == 13:
+        from retm_kalman.fusnet_inference_13 import (
+            load_fusnet13_model as load_fusnet_model,
+            predict_fusnet13_original_style as predict_fusnet,
+        )
+        from retm_kalman.kalman_full_13 import FullKalmanCorrectionReTM
+        from retm_kalman.kalman_block_13 import BlockKalmanCorrectionReTM
+    elif mic_config == 12:
         from retm_kalman.fusnet_inference_12 import (
             load_fusnet12_model as load_fusnet_model,
             predict_fusnet12_original_style as predict_fusnet,
