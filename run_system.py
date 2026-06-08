@@ -2,6 +2,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 from retm_kalman.io_utils import read_mic_wavs, normalize_pair, write_mic_wavs
 from retm_kalman.metrics import print_basic_metrics, sdr_db, mse_db
@@ -144,6 +147,19 @@ def main(config_path: str = "config.json"):
     mA_hat, delta_hat, err = kf.process(mB=mB, mA=mA, mA_fusnet=mA_f)
     print_basic_metrics(mA, mA_hat, name="FuSNet + Kalman final estimate")
 
+    # Frame-wise error trace for checking convergence toward zero.
+    # We use per-sample RMSE across channels, then smooth it a little so the
+    # trend over time is easier to inspect.
+    error_trace = np.sqrt(np.mean(err.astype(np.float64) ** 2, axis=0))
+    smooth_window = int(out_cfg.get("error_smooth_window", 1))
+    if smooth_window > 1:
+        kernel = np.ones(smooth_window, dtype=np.float64) / smooth_window
+        error_trace_smooth = np.convolve(error_trace, kernel, mode="same")
+    else:
+        error_trace_smooth = error_trace
+
+    sample_times_sec = np.arange(T, dtype=np.float64) / float(fs)
+
     print("\n[5] Saving outputs...")
     if bool(out_cfg.get("save_npy", True)):
         np.save(out_dir / "mA_target.npy", mA)
@@ -152,6 +168,25 @@ def main(config_path: str = "config.json"):
         np.save(out_dir / "delta_kalman.npy", delta_hat)
         np.save(out_dir / "mA_final_kalman.npy", mA_hat)
         np.save(out_dir / "error_final.npy", err)
+        np.save(out_dir / "error_trace_rms.npy", error_trace)
+        np.save(out_dir / "error_trace_rms_smooth.npy", error_trace_smooth)
+
+    if bool(out_cfg.get("save_error_plot", True)):
+        plt.figure(figsize=(10, 4))
+        plt.plot(sample_times_sec, error_trace, linewidth=1.0, alpha=0.35, label="sample RMS error")
+        if smooth_window > 1:
+            plt.plot(sample_times_sec, error_trace_smooth, linewidth=2.0, label=f"smoothed RMS (window={smooth_window})")
+        else:
+            plt.plot(sample_times_sec, error_trace_smooth, linewidth=2.0, label="sample RMS error")
+        plt.axhline(0.0, color="black", linewidth=0.8, linestyle="--")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Estimation error RMS")
+        plt.title("Kalman estimation error over time")
+        plt.grid(True, alpha=0.3)
+        plt.legend(loc="best")
+        plt.tight_layout()
+        plt.savefig(out_dir / "kalman_error_trace.png", dpi=200)
+        plt.close()
 
     if bool(out_cfg.get("save_wav", True)):
         write_mic_wavs(out_dir / "wav_target_mA", mA, fs, prefix="target_mic")
