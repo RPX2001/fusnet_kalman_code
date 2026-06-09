@@ -1,161 +1,278 @@
 from __future__ import annotations
+
 import numpy as np
 import torch
 
 
 class FullKalmanCorrectionReTM:
     """
-    Standard Kalman correction ReTM estimator.
+    Sample-by-sample Kalman ReTM tracker using FuSNet output directly.
 
-    FuSNet gives:
-        mA_f(t)
+    New model:
+        u(t)      = FuSNet(mB)(t)          shape [QA]
+        mA_hat(t) = R(t) * u_buffer(t)     shape [QA]
+        e(t)      = mA(t) - mA_hat(t)
 
-    Kalman estimates residual/correction ReTM:
-        delta_mA(t) = R_delta(t) mB(t)
+    Here R has size:
+        R: QA x QA x L
 
-    Final:
-        mA_hat(t) = mA_f(t) + delta_mA(t)
+    For 13-mic setup:
+        QA = 5
+        R  = 5 x 5 x L
 
-    This is "without block Kalman".
-    Each Group A output uses a full covariance matrix of size (QB*L) x (QB*L).
+    This implementation uses a diagonal Kalman covariance approximation
+    to avoid the huge full covariance matrix.
     """
 
-    def __init__(self,
-                 qb: int = 4,
-                 qa: int = 3,
-                 L: int = 256,
-                 transition: float = 0.995,
-                 process_noise: float = 1e-7,
-                 observation_noise: float = 1e-3,
-                 initial_covariance: float = 1e-2,
-                 dtype=np.float64,
-                 device: str | None = None):
-        self.qb = qb
-        self.qa = qa
-        self.L = L
-        self.n = qb * L
-        self.transition = transition
-        self.q = process_noise
-        self.r = observation_noise
+    def __init__(
+        self,
+        qb: int = 8,          # kept only for compatibility with old run_system.py
+        qa: int = 5,
+        L: int = 256,
+        transition: float = 0.995,
+        process_noise: float = 1e-7,
+        observation_noise: float = 1e-3,
+        initial_covariance: float = 1e-2,
+        dtype=None,
+        device: str | None = None,
+    ):
+        if dtype is None:
+            dtype = np.float64
+
+        self.qb = int(qb)
+        self.qa = int(qa)
+        self.L = int(L)
+
+        self.transition = float(transition)
+        self.process_noise = float(process_noise)
+        self.observation_noise = float(observation_noise)
+        self.initial_covariance = float(initial_covariance)
+
         self.dtype = dtype
-        # device: if provided and torch available, run Kalman on that device
         self.device = device
         self.use_torch = False
+        self.torch_device = None
+        self.torch_dtype = torch.float64 if dtype == np.float64 else torch.float32
+
         if device is not None:
             try:
-                dev = torch.device(device) if not isinstance(device, torch.device) else device
-                if dev.type == "cuda" and torch.cuda.is_available():
+                requested_device = torch.device(device)
+                if requested_device.type == "cuda" and torch.cuda.is_available():
                     self.use_torch = True
-                    self.torch_device = dev
-                    self.torch_dtype = torch.float64 if dtype == np.float64 else torch.float32
+                    self.torch_device = requested_device
             except Exception:
                 self.use_torch = False
 
+        # New filter dimension:
+        # each output channel has QA input channels, each with L taps
+        self.input_dim = self.qa * self.L
+
         if self.use_torch:
-            self.w = torch.zeros((qa, self.n), dtype=self.torch_dtype, device=self.torch_device)
-            self.P = torch.stack([torch.eye(self.n, dtype=self.torch_dtype, device=self.torch_device) * initial_covariance
-                                   for _ in range(qa)], dim=0)
-            self.xbuf = torch.zeros((qb, L), dtype=self.torch_dtype, device=self.torch_device)
+            self.R = torch.zeros(
+                (self.qa, self.input_dim),
+                dtype=self.torch_dtype,
+                device=self.torch_device,
+            )
+            self.P = torch.full(
+                (self.qa, self.input_dim),
+                self.initial_covariance,
+                dtype=self.torch_dtype,
+                device=self.torch_device,
+            )
         else:
-            self.w = np.zeros((qa, self.n), dtype=dtype)
-            self.P = np.stack([np.eye(self.n, dtype=dtype) * initial_covariance for _ in range(qa)], axis=0)
-            self.xbuf = np.zeros((qb, L), dtype=dtype)
+            # R shape: [QA, QA*L]
+            # Equivalent to QA x QA x L
+            self.R = np.zeros((self.qa, self.input_dim), dtype=self.dtype)
 
-    def _update_buffer(self, mB_t: np.ndarray):
+            # Diagonal covariance for each output filter coefficient
+            self.P = self.initial_covariance * np.ones(
+                (self.qa, self.input_dim), dtype=self.dtype
+            )
+
+        # Initialize R close to identity:
+        # output channel q initially follows FuSNet output channel q at delay 0
+        for q in range(self.qa):
+            idx = q * self.L
+            self.R[q, idx] = 1.0
+
+        # FuSNet output buffer: [QA, L]
         if self.use_torch:
-            # mB_t is numpy; convert and operate on torch buffer
-            mt = torch.as_tensor(mB_t, dtype=self.torch_dtype, device=self.torch_device)
-            self.xbuf[:, 1:] = self.xbuf[:, :-1]
-            self.xbuf[:, 0] = mt
-            return self.xbuf.reshape(-1)
+            self.u_buffer = torch.zeros(
+                (self.qa, self.L), dtype=self.torch_dtype, device=self.torch_device
+            )
         else:
-            self.xbuf[:, 1:] = self.xbuf[:, :-1]
-            self.xbuf[:, 0] = mB_t
-            return self.xbuf.reshape(-1)  # [QB*L]
+            self.u_buffer = np.zeros((self.qa, self.L), dtype=self.dtype)
 
-    def process(self, mB: np.ndarray, mA: np.ndarray, mA_fusnet: np.ndarray):
-        qb, T = mB.shape
-        qa, T2 = mA.shape
-        assert qb == self.qb
-        assert qa == self.qa
-        assert T == T2 == mA_fusnet.shape[1]
+    def _reset_buffer(self):
+        self.u_buffer[:, :] = 0.0
 
-        mA_hat = np.zeros_like(mA, dtype=np.float32)
-        delta_hat = np.zeros_like(mA, dtype=np.float32)
-        err_all = np.zeros_like(mA, dtype=np.float32)
+    def _update_buffer(self, u_t: np.ndarray):
+        """
+        u_t: FuSNet output sample, shape [QA]
+        """
+        if self.use_torch:
+            u_t = torch.as_tensor(u_t, dtype=self.torch_dtype, device=self.torch_device)
+        self.u_buffer[:, 1:] = self.u_buffer[:, :-1]
+        self.u_buffer[:, 0] = u_t
+
+    def _make_phi(self) -> np.ndarray:
+        """
+        Construct regressor vector from FuSNet output buffer.
+
+        phi = [
+            u1(t), u1(t-1), ..., u1(t-L+1),
+            u2(t), u2(t-1), ..., u2(t-L+1),
+            ...
+            uQA(t), ..., uQA(t-L+1)
+        ]
+
+        shape: [QA*L]
+        """
+        return self.u_buffer.reshape(-1)
+
+    def process(
+        self,
+        mB: np.ndarray,
+        mA: np.ndarray,
+        mA_fusnet: np.ndarray,
+    ):
+        """
+        Args:
+            mB        : Group-B microphones, shape [QB, T]
+                        Not used in new method, kept for interface compatibility.
+            mA        : Actual Group-A target, shape [QA, T]
+            mA_fusnet : FuSNet initial Group-A estimate, shape [QA, T]
+
+        Returns:
+            mA_hat    : Kalman-filtered estimate, shape [QA, T]
+            delta_hat : mA_hat - mA_fusnet, shape [QA, T]
+            err       : mA - mA_hat, shape [QA, T]
+        """
+
+        mA = np.asarray(mA, dtype=self.dtype)
+        mA_fusnet = np.asarray(mA_fusnet, dtype=self.dtype)
+
+        if mA.ndim != 2:
+            raise ValueError(f"Expected mA shape [QA, T], got {mA.shape}")
+
+        if mA_fusnet.ndim != 2:
+            raise ValueError(f"Expected mA_fusnet shape [QA, T], got {mA_fusnet.shape}")
+
+        if mA.shape[0] != self.qa:
+            raise ValueError(f"Expected mA with QA={self.qa}, got {mA.shape[0]}")
+
+        if mA_fusnet.shape[0] != self.qa:
+            raise ValueError(
+                f"Expected mA_fusnet with QA={self.qa}, got {mA_fusnet.shape[0]}"
+            )
+
+        T = min(mA.shape[1], mA_fusnet.shape[1])
+        mA = mA[:, :T]
+        mA_fusnet = mA_fusnet[:, :T]
+
+        mA_hat = np.zeros((self.qa, T), dtype=self.dtype)
+        err = np.zeros((self.qa, T), dtype=self.dtype)
+
+        self._reset_buffer()
+
+        G = self.transition
+        Qn = self.process_noise
+        Rv = self.observation_noise
 
         if self.use_torch:
-            I = torch.eye(self.n, dtype=self.torch_dtype, device=self.torch_device)
             for t in range(T):
-                x = self._update_buffer(mB[:, t])
+                u_t = mA_fusnet[:, t]
+                d_t = torch.as_tensor(mA[:, t], dtype=self.torch_dtype, device=self.torch_device)
 
-                # 1) state prediction
-                self.w *= self.transition
-                self.P = (self.transition ** 2) * self.P
-                for a in range(self.qa):
-                    self.P[a] = self.P[a] + I * self.q
+                self._update_buffer(u_t)
+                phi = self._make_phi()
 
-                # 2) predicted output and innovation
-                y_delta = torch.mv(self.w, x)
-                y_hat = torch.as_tensor(mA_fusnet[:, t], dtype=self.torch_dtype, device=self.torch_device) + y_delta
-                e = torch.as_tensor(mA[:, t], dtype=self.torch_dtype, device=self.torch_device) - y_hat
+                for q in range(self.qa):
+                    # -----------------------------
+                    # Prediction
+                    # -----------------------------
+                    R_pred = G * self.R[q]
+                    P_pred = (G ** 2) * self.P[q] + Qn
 
-                # 3) Kalman update per target mic
-                for a in range(self.qa):
-                    P = self.P[a]
-                    Px = P @ x
-                    S = float((x @ Px).cpu().item() + self.r)
-                    denom = S if S > 1e-12 else 1e-12
-                    K = Px / denom
+                    # -----------------------------
+                    # Output estimate
+                    # -----------------------------
+                    y_hat = torch.dot(R_pred, phi)
+                    e = d_t[q] - y_hat
 
-                    self.w[a] = self.w[a] + K * e[a]
-                    self.P[a] = (I - torch.ger(K, x)) @ P
+                    # -----------------------------
+                    # Kalman gain
+                    # -----------------------------
+                    S = torch.sum(P_pred * (phi ** 2)) + Rv
+                    K = (P_pred * phi) / (S + 1e-12)
 
-                # output after update
-                y_delta = torch.mv(self.w, x)
-                y_hat = torch.as_tensor(mA_fusnet[:, t], dtype=self.torch_dtype, device=self.torch_device) + y_delta
-                e_final = torch.as_tensor(mA[:, t], dtype=self.torch_dtype, device=self.torch_device) - y_hat
+                    # -----------------------------
+                    # Update R filter
+                    # -----------------------------
+                    R_new = R_pred + K * e
 
-                delta_hat[:, t] = y_delta.cpu().numpy().astype(np.float32)
-                mA_hat[:, t] = y_hat.cpu().numpy().astype(np.float32)
-                err_all[:, t] = e_final.cpu().numpy().astype(np.float32)
+                    # -----------------------------
+                    # Update covariance
+                    # -----------------------------
+                    P_new = (1.0 - K * phi) * P_pred
+                    P_new = torch.clamp(P_new, min=1e-12)
+
+                    self.R[q] = R_new
+                    self.P[q] = P_new
+
+                    mA_hat[q, t] = float(y_hat.detach().cpu().item())
+                    err[q, t] = float(e.detach().cpu().item())
         else:
-            I = np.eye(self.n, dtype=self.dtype)
-
             for t in range(T):
-                x = self._update_buffer(mB[:, t].astype(self.dtype))
+                u_t = mA_fusnet[:, t]
+                d_t = mA[:, t]
 
-                # 1) state prediction
-                self.w *= self.transition
-                self.P = (self.transition ** 2) * self.P
-                for a in range(self.qa):
-                    self.P[a] += I * self.q
+                self._update_buffer(u_t)
+                phi = self._make_phi()
 
-                # 2) predicted output and innovation
-                y_delta = np.einsum("an,n->a", self.w, x)
-                y_hat = mA_fusnet[:, t].astype(self.dtype) + y_delta
-                e = mA[:, t].astype(self.dtype) - y_hat
+                for q in range(self.qa):
+                    # -----------------------------
+                    # Prediction
+                    # -----------------------------
+                    R_pred = G * self.R[q]
+                    P_pred = (G ** 2) * self.P[q] + Qn
 
-                # 3) Kalman update per target mic
-                for a in range(self.qa):
-                    P = self.P[a]
-                    Px = P @ x
-                    S = float(x @ Px + self.r)
-                    K = Px / max(S, 1e-12)
+                    # -----------------------------
+                    # Output estimate
+                    # -----------------------------
+                    y_hat = float(np.dot(R_pred, phi))
+                    e = float(d_t[q] - y_hat)
 
-                    self.w[a] = self.w[a] + K * e[a]
-                    self.P[a] = (I - np.outer(K, x)) @ P
+                    # -----------------------------
+                    # Kalman gain
+                    # -----------------------------
+                    # Diagonal covariance approximation:
+                    # S = phi^T P phi + observation_noise
+                    S = float(np.sum(P_pred * (phi ** 2)) + Rv)
 
-                # output after update
-                y_delta = np.einsum("an,n->a", self.w, x)
-                y_hat = mA_fusnet[:, t].astype(self.dtype) + y_delta
-                e_final = mA[:, t].astype(self.dtype) - y_hat
+                    K = (P_pred * phi) / (S + 1e-12)
 
-                delta_hat[:, t] = y_delta.astype(np.float32)
-                mA_hat[:, t] = y_hat.astype(np.float32)
-                err_all[:, t] = e_final.astype(np.float32)
+                    # -----------------------------
+                    # Update R filter
+                    # -----------------------------
+                    R_new = R_pred + K * e
 
-        return mA_hat, delta_hat, err_all
+                    # -----------------------------
+                    # Update covariance
+                    # -----------------------------
+                    P_new = (1.0 - K * phi) * P_pred
+                    P_new = np.maximum(P_new, 1e-12)
 
-    def get_correction_filters(self):
-        return self.w.reshape(self.qa, self.qb, self.L).copy()
+                    self.R[q] = R_new
+                    self.P[q] = P_new
+
+                    mA_hat[q, t] = y_hat
+                    err[q, t] = e
+
+        delta_hat = mA_hat - mA_fusnet
+
+        return (
+            mA_hat.astype(np.float32),
+            delta_hat.astype(np.float32),
+            err.astype(np.float32),
+        )

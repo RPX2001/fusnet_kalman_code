@@ -1,6 +1,6 @@
 {
   "data": {
-    "seq_dir": "/home/jaliya/eeg_speech/Julian/RetM_Workspace/Dataset/A2_rctd",
+    "seq_dir": "/home/jaliya/eeg_speech/Julian/RetM_Workspace/Dataset/mic_moving",
     "out_dir": "outputs/fusnet_kalman_moving",
     "fs": 16000,
     "normalize": true,
@@ -34,8 +34,8 @@
     "device": "cuda"
   },
   "kalman": {
-    "mode": "block",
-    "L": 131072,
+    "mode": "full",
+    "L": 8192,
     "block_size": 256,
     "transition": 0.995,
     "process_noise": 1e-07,

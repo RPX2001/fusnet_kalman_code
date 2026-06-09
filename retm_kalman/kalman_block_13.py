@@ -4,7 +4,14 @@ from .kalman_block import BlockKalmanCorrectionReTM as _BaseBlockKalmanCorrectio
 
 
 class BlockKalmanCorrectionReTM(_BaseBlockKalmanCorrectionReTM):
-    """13-mic default wrapper for the block Kalman correction model."""
+    """
+    13-mic wrapper for block FuSNet-output Kalman ReTM.
+
+    New R dimension:
+        QA x QA x L = 5 x 5 x L
+
+    qb is kept only for compatibility with run_system.py.
+    """
 
     def __init__(
         self,
@@ -21,8 +28,8 @@ class BlockKalmanCorrectionReTM(_BaseBlockKalmanCorrectionReTM):
     ):
         if dtype is None:
             import numpy as np
-
             dtype = np.float64
+
         super().__init__(
             qb=qb,
             qa=qa,
