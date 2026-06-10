@@ -384,12 +384,12 @@ def main():
     observation_noise = 1e-2
     initial_covariance = 1e-3
 
-    kalman_lr = 0.01
-    max_grad_norm = 1.0
+    kalman_lr = 20
+    max_grad_norm = 1
 
     # "initial" keeps parameters close to original checkpoint.
     # "zero" applies direct G*r decay.
-    transition_center = "initial"
+    transition_center = "zero"
 
     save_adapted_checkpoint = True
 
