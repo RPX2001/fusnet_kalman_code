@@ -22,8 +22,8 @@
   },
   "kalman": {
     "mode": "block",
-    "L": 16384,
-    "block_size": 64,
+    "L": 4096,
+    "block_size": 256,
     "transition": 0.995,
     "process_noise": 1.0e-7,
     "observation_noise": 1.0e-3,
