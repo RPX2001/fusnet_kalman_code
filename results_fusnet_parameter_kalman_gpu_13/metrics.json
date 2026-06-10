@@ -1,0 +1,48 @@
+{
+  "mode": "block",
+  "fs": 16000,
+  "num_samples": 100531,
+  "context": 4096,
+  "filter_length": 8193,
+  "window_size": 16384,
+  "stride": 8192,
+  "kalman_block_frames": 4,
+  "transition": 0.995,
+  "process_noise": 1e-08,
+  "observation_noise": 0.01,
+  "initial_covariance": 0.001,
+  "kalman_lr": 1e-06,
+  "max_grad_norm": 1.0,
+  "transition_center": "initial",
+  "total_updated_parameters": 327720,
+  "baseline_sdr_per_channel": [
+    -4.994062900543213,
+    -5.444001197814941,
+    -4.784253120422363,
+    -3.807192325592041,
+    -0.5803573727607727
+  ],
+  "baseline_sdr_avg": -3.921973466873169,
+  "param_kalman_sdr_per_channel": [
+    -4.994062900543213,
+    -5.444001197814941,
+    -4.784253120422363,
+    -3.807192325592041,
+    -0.5803573727607727
+  ],
+  "param_kalman_sdr_avg": -3.921973466873169,
+  "baseline_mse_db_per_channel": [
+    -24.395017623901367,
+    -23.07265853881836,
+    -23.690391540527344,
+    -22.922412872314453,
+    -16.43520736694336
+  ],
+  "param_kalman_mse_db_per_channel": [
+    -24.395017623901367,
+    -23.07265853881836,
+    -23.690391540527344,
+    -22.922412872314453,
+    -16.43520736694336
+  ]
+}
