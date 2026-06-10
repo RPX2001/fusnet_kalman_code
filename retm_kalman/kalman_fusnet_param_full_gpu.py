@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 from typing import Dict, Optional
 
 import torch
@@ -9,36 +8,34 @@ import torch.nn as nn
 
 class FullGPUFUSENetParameterKalman:
     """
-    GPU diagonal Kalman-style adaptation of ALL FuSNet parameters.
+    GPU full-frame parameter Kalman-style adaptation of ALL FuSNet parameters.
 
     State:
         r(t) = all FuSNet trainable parameters
 
-    Model:
+    Observation model:
         mA_hat(t) = FuSNet_{r(t)}(mB(t))
 
     Error:
         e(t) = mA(t) - mA_hat(t)
 
-    Practical update:
-        Prediction:
-            r_minus = r0 + G * (r - r0)
-            P_minus = G^2 P + Q
+    Practical GPU update:
+        Full covariance Kalman over all FuSNet parameters is not feasible.
+        This class updates all parameters using GPU diagonal covariance tensors
+        with Kalman-style prediction and gain.
 
-        Update:
-            loss = 0.5 * mean(e^2)
-            grad = d(loss) / d(r)
+    Prediction:
+        r_minus = r0 + G * (r - r0)
+        P_minus = G^2 P + Q
 
-            K_diag = P_minus / (P_minus + Rv)
-            r_new = r_minus - kalman_lr * K_diag * grad
+    Update:
+        loss = 0.5 * mean(e^2)
+        grad = d(loss) / d(r)
 
-            P_new = (1 - K_diag) * P_minus
+        K_diag = P_minus / (P_minus + Rv)
+        r_new = r_minus - kalman_lr * K_diag * grad
 
-    Notes:
-        - All parameters are updated.
-        - All tensors stay on GPU if the model is on GPU.
-        - r0 is the original checkpoint parameter value.
-        - Using r0-centered transition avoids destroying pretrained weights.
+        P_new = (1 - K_diag) * P_minus
     """
 
     def __init__(
@@ -87,6 +84,7 @@ class FullGPUFUSENetParameterKalman:
         """
         Predict all FuSNet parameters on GPU.
         """
+
         for name, p in self.model.named_parameters():
             if not p.requires_grad:
                 continue
@@ -103,6 +101,7 @@ class FullGPUFUSENetParameterKalman:
         """
         Backpropagate observation error and update all FuSNet parameters on GPU.
         """
+
         self.model.zero_grad(set_to_none=True)
 
         loss.backward()
@@ -135,15 +134,16 @@ class FullGPUFUSENetParameterKalman:
 
     def step(self, x_frame: torch.Tensor, d_frame: torch.Tensor):
         """
-        One full Kalman-style update.
+        One FuSNet-frame Kalman-style parameter update.
 
         Args:
             x_frame: [B, 8, window_size]
             d_frame: [B, 5, output_length]
 
         Returns:
-            y_hat, error, loss
+            y_hat, error, loss_value
         """
+
         self.predict_parameters()
 
         y_hat = self.model(x_frame)

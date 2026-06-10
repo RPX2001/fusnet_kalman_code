@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import os
 import json
 import random
 from pathlib import Path
 
 import numpy as np
-
 import torch
 import torch.nn.functional as F
 import torchaudio
 
-from retm_kalman.fusnet_inference_13 import load_fusnet13_model
+from retm_kalman.fusnet_inference_13 import (
+    load_fusnet13_model,
+    predict_fusnet13_original_style,
+)
 from retm_kalman.kalman_fusnet_param_full_gpu import FullGPUFUSENetParameterKalman
 from retm_kalman.kalman_fusnet_param_block_gpu import BlockGPUFUSENetParameterKalman
 
@@ -26,10 +27,13 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 torch.cuda.manual_seed_all(SEED)
 
-# For maximum speed, benchmark=True is faster but not fully deterministic.
-# For exact reproducibility, set benchmark=False and deterministic=True.
+# Fast mode. Results may vary slightly between runs.
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
+
+# For exact reproducibility, use:
+# torch.backends.cudnn.benchmark = False
+# torch.backends.cudnn.deterministic = True
 
 
 # ============================================================
@@ -117,102 +121,142 @@ def print_metrics(target: np.ndarray, estimate: np.ndarray, name: str):
     print("MSE dB avg     :", float(np.mean(mse)))
 
 
-def make_frames(mB: torch.Tensor, mA: torch.Tensor, context: int, window_size: int, stride: int):
+# ============================================================
+# Correct FuSNet13 original-style frame alignment
+# ============================================================
+
+def make_fusnet13_frames_original_style(
+    mB: torch.Tensor,
+    mA: torch.Tensor,
+    context: int,
+    window_size: int,
+    stride: int,
+):
     """
-    Create FuSNet input/target frames.
+    Create FuSNet13 frames using the same alignment as predict_fusnet13_original_style().
 
-    mB: [8, T]
-    mA: [5, T]
+    Original inference:
+        mB_pad = pad(mB, context, context)
+        frames = frame_signal(mB_pad, window_size, stride)
+        y_full = overlap_add(y_frames, hop=stride)
+        y = y_full[:, context:context + T_orig]
 
-    Input frame:
-        [8, window_size]
+    Therefore, a model output frame from padded start index 'start'
+    maps to original target index:
 
-    Target frame:
-        [5, window_size - 2*context]
-
-    For context=4096 and window_size=16384:
-        target length = 8192
+        target_start = start - context
     """
+
+    if mB.ndim != 2 or mB.shape[0] != 8:
+        raise ValueError(f"Expected mB shape [8, T], got {tuple(mB.shape)}")
+
+    if mA.ndim != 2 or mA.shape[0] != 5:
+        raise ValueError(f"Expected mA shape [5, T], got {tuple(mA.shape)}")
+
     T = min(mB.shape[1], mA.shape[1])
     mB = mB[:, :T]
     mA = mA[:, :T]
 
-    out_len = window_size - 2 * context
+    filter_length = 2 * context + 1
+    out_len = window_size - filter_length + 1
 
     if out_len <= 0:
-        raise ValueError("window_size must be larger than 2*context")
+        raise ValueError("window_size must be larger than filter_length")
 
+    # Same input padding as original inference
     mB_pad = F.pad(mB, (context, context), mode="constant", value=0.0)
+
+    padded_len = mB_pad.shape[1]
 
     frames_x = []
     frames_d = []
-    starts = []
+    output_starts_original = []
 
-    for start in range(0, T, stride):
-        x_start = start
-        x_end = x_start + window_size
+    for start in range(0, padded_len - window_size + 1, stride):
+        x_frame = mB_pad[:, start:start + window_size]
 
-        x_frame = mB_pad[:, x_start:x_end]
+        target_start = start - context
+        target_end = target_start + out_len
 
-        if x_frame.shape[1] < window_size:
-            pad_right = window_size - x_frame.shape[1]
-            x_frame = F.pad(x_frame, (0, pad_right), mode="constant", value=0.0)
+        d_frame = torch.zeros(
+            (mA.shape[0], out_len),
+            dtype=mA.dtype,
+            device=mA.device,
+        )
 
-        d_start = start
-        d_end = min(start + out_len, T)
+        valid_start = max(target_start, 0)
+        valid_end = min(target_end, T)
 
-        d_frame = mA[:, d_start:d_end]
-
-        if d_frame.shape[1] < out_len:
-            pad_right = out_len - d_frame.shape[1]
-            d_frame = F.pad(d_frame, (0, pad_right), mode="constant", value=0.0)
+        if valid_end > valid_start:
+            dst_start = valid_start - target_start
+            dst_end = dst_start + (valid_end - valid_start)
+            d_frame[:, dst_start:dst_end] = mA[:, valid_start:valid_end]
 
         frames_x.append(x_frame)
         frames_d.append(d_frame)
-        starts.append(start)
+        output_starts_original.append(target_start)
 
-        if start + out_len >= T:
-            break
-
-    return frames_x, frames_d, starts, T, out_len
+    return frames_x, frames_d, output_starts_original, T, out_len
 
 
-def overlap_add(frames: list[np.ndarray], starts: list[int], T: int, qa: int):
+def overlap_add_original_style(
+    frames: list[np.ndarray],
+    starts_original: list[int],
+    T: int,
+    qa: int = 5,
+):
+    """
+    Overlap-add using original-time output positions.
+
+    Some first-frame outputs start at negative index because of context padding.
+    This function crops those parts correctly.
+    """
+
     y = np.zeros((qa, T), dtype=np.float64)
     w = np.zeros((T,), dtype=np.float64)
 
-    for frame, start in zip(frames, starts):
+    for frame, start in zip(frames, starts_original):
         frame_len = frame.shape[1]
-        end = min(start + frame_len, T)
-        valid = end - start
+        end = start + frame_len
 
-        if valid <= 0:
+        dst_start = max(start, 0)
+        dst_end = min(end, T)
+
+        if dst_end <= dst_start:
             continue
 
-        y[:, start:end] += frame[:, :valid]
-        w[start:end] += 1.0
+        src_start = dst_start - start
+        src_end = src_start + (dst_end - dst_start)
+
+        y[:, dst_start:dst_end] += frame[:, src_start:src_end]
+        w[dst_start:dst_end] += 1.0
 
     w[w == 0] = 1.0
 
     return (y / w[None, :]).astype(np.float32)
 
 
-@torch.no_grad()
-def run_baseline_fusnet(model, frames_x, starts, T, qa, device):
+# ============================================================
+# Kalman run functions
+# ============================================================
+
+def run_full_param_kalman(
+    model,
+    frames_x,
+    frames_d,
+    starts,
+    T,
+    qa,
+    updater,
+    device,
+):
+    """
+    Full mode:
+        one Kalman-style parameter update per FuSNet frame.
+    """
+
+    # Keep eval mode; gradients still work.
     model.eval()
-
-    out_frames = []
-
-    for x in frames_x:
-        x = x.unsqueeze(0).to(device, non_blocking=True)
-        y = model(x)
-        out_frames.append(y.squeeze(0).detach().cpu().float().numpy())
-
-    return overlap_add(out_frames, starts, T, qa)
-
-
-def run_full_param_kalman(model, frames_x, frames_d, starts, T, qa, updater, device):
-    model.train()
 
     out_frames = []
     error_trace = []
@@ -224,19 +268,39 @@ def run_full_param_kalman(model, frames_x, frames_d, starts, T, qa, updater, dev
         y, e, loss = updater.step(x, d)
 
         out_frames.append(y.squeeze(0).cpu().float().numpy())
-        error_trace.append(torch.sqrt(torch.mean(e ** 2)).cpu().item())
 
-        if (i + 1) % 10 == 0:
-            print(f"Full Kalman frame {i+1:04d}/{len(frames_x)}, loss={loss:.6e}")
+        err_rms = torch.sqrt(torch.mean(e ** 2)).cpu().item()
+        error_trace.append(err_rms)
 
-    mA_hat = overlap_add(out_frames, starts, T, qa)
+        if (i + 1) % 10 == 0 or (i + 1) == len(frames_x):
+            print(
+                f"Full parameter Kalman frame {i+1:04d}/{len(frames_x)}, "
+                f"loss={loss:.6e}, err_rms={err_rms:.6e}"
+            )
+
+    mA_hat = overlap_add_original_style(out_frames, starts, T, qa)
     error_trace = np.asarray(error_trace, dtype=np.float32)
 
     return mA_hat, error_trace
 
 
-def run_block_param_kalman(model, frames_x, frames_d, starts, T, qa, updater, device):
-    model.train()
+def run_block_param_kalman(
+    model,
+    frames_x,
+    frames_d,
+    starts,
+    T,
+    qa,
+    updater,
+    device,
+):
+    """
+    Block mode:
+        one Kalman-style parameter update per block of FuSNet frames.
+    """
+
+    # Keep eval mode; gradients still work.
+    model.eval()
 
     out_frames = []
     out_starts = []
@@ -248,8 +312,12 @@ def run_block_param_kalman(model, frames_x, frames_d, starts, T, qa, updater, de
     for block_start in range(0, num_frames, block_frames):
         block_end = min(block_start + block_frames, num_frames)
 
-        xb = torch.stack(frames_x[block_start:block_end], dim=0).to(device, non_blocking=True)
-        db = torch.stack(frames_d[block_start:block_end], dim=0).to(device, non_blocking=True)
+        xb = torch.stack(frames_x[block_start:block_end], dim=0).to(
+            device, non_blocking=True
+        )
+        db = torch.stack(frames_d[block_start:block_end], dim=0).to(
+            device, non_blocking=True
+        )
 
         yb, eb, loss = updater.step_block(xb, db)
 
@@ -263,11 +331,11 @@ def run_block_param_kalman(model, frames_x, frames_d, starts, T, qa, updater, de
         error_trace.extend(err_rms.tolist())
 
         print(
-            f"Block Kalman frames {block_start+1:04d}-{block_end:04d}/{num_frames}, "
-            f"loss={loss:.6e}"
+            f"Block parameter Kalman frames {block_start+1:04d}-{block_end:04d}/"
+            f"{num_frames}, loss={loss:.6e}"
         )
 
-    mA_hat = overlap_add(out_frames, out_starts, T, qa)
+    mA_hat = overlap_add_original_style(out_frames, out_starts, T, qa)
     error_trace = np.asarray(error_trace, dtype=np.float32)
 
     return mA_hat, error_trace
@@ -286,9 +354,11 @@ def main():
         "/home/jaliya/eeg_speech/Julian/RetM_Workspace/Dataset/mic_moving"
     )
 
-    checkpoint_path = Path("/home/jaliya/eeg_speech/Julian/RetM_Workspace/ReTM_Research_Project/best_checkpoint_A1_1_FUSENet_13_rctd.pth")
+    checkpoint_path = Path(
+        "/home/jaliya/eeg_speech/Julian/RetM_Workspace/ReTM_Research_Project/best_checkpoint_A1_1_FUSENet_13_rctd.pth"
+    )
 
-    out_dir = Path("results_fusnet_parameter_kalman_gpu_13")
+    out_dir = Path("results_fusnet_parameter_kalman_gpu_13_corrected")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     fs_target = 16000
@@ -303,10 +373,10 @@ def main():
     stride = 8192
 
     # Choose "full" or "block"
-    mode = "block"
+    mode = "full"
 
-    # Block Kalman setting:
-    # This is number of FuSNet frames per Kalman update, not audio samples.
+    # For block mode, this is number of FuSNet frames per update,
+    # not number of audio samples.
     kalman_block_frames = 4
 
     transition = 0.995
@@ -314,17 +384,21 @@ def main():
     observation_noise = 1e-2
     initial_covariance = 1e-3
 
-    kalman_lr = 0.000001
+    kalman_lr = 0.01
     max_grad_norm = 1.0
 
+    # "initial" keeps parameters close to original checkpoint.
+    # "zero" applies direct G*r decay.
     transition_center = "initial"
 
     save_adapted_checkpoint = True
 
+    batch_size_for_baseline = 8
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print("=" * 90)
-    print("GPU FuSNet Full-Parameter Kalman Adaptation")
+    print("Corrected GPU FuSNet Full-Parameter Kalman Adaptation")
     print("=" * 90)
     print(f"Mode        : {mode}")
     print(f"Device      : {device}")
@@ -349,6 +423,10 @@ def main():
 
     fs = fsA
 
+    T0 = min(mA_cpu.shape[1], mB_cpu.shape[1])
+    mA_cpu = mA_cpu[:, :T0]
+    mB_cpu = mB_cpu[:, :T0]
+
     mA_cpu, mB_cpu, scale = normalize_pair_torch(mA_cpu, mB_cpu)
 
     print(f"mA shape: {tuple(mA_cpu.shape)}")
@@ -356,17 +434,51 @@ def main():
     print(f"fs      : {fs}")
     print(f"scale   : {scale:.8f}")
 
-    # Keep full signals on GPU for frame slicing speed
+    # --------------------------------------------------------
+    # Baseline FuSNet using ORIGINAL inference function
+    # --------------------------------------------------------
+
+    print("\n[2] Loading baseline FuSNet model...")
+
+    baseline_model, dev_loaded = load_fusnet13_model(
+        checkpoint_path=checkpoint_path,
+        context=context,
+        device=str(device),
+    )
+
+    baseline_model.eval()
+
+    print("\n[3] Running baseline FuSNet using original inference function...")
+
+    mA_fusnet = predict_fusnet13_original_style(
+        model=baseline_model,
+        mB=mB_cpu.numpy(),
+        context=context,
+        window_size=window_size,
+        stride=stride,
+        batch_size=batch_size_for_baseline,
+        device=device,
+    )
+
+    T = min(mA_cpu.shape[1], mB_cpu.shape[1], mA_fusnet.shape[1])
+    mA_cpu = mA_cpu[:, :T]
+    mB_cpu = mB_cpu[:, :T]
+    mA_fusnet = mA_fusnet[:, :T]
+
+    mA_np = mA_cpu.numpy()
+
+    print_metrics(mA_np, mA_fusnet, "Baseline FuSNet original-style inference")
+
+    # --------------------------------------------------------
+    # Move full signals to GPU and create corrected frames
+    # --------------------------------------------------------
+
+    print("\n[4] Creating corrected FuSNet frames on GPU...")
+
     mA_gpu = mA_cpu.to(device, non_blocking=True)
     mB_gpu = mB_cpu.to(device, non_blocking=True)
 
-    # --------------------------------------------------------
-    # Make frames directly on GPU
-    # --------------------------------------------------------
-
-    print("\n[2] Creating FuSNet frames...")
-
-    frames_x, frames_d, starts, T, out_len = make_frames(
+    frames_x, frames_d, starts, T, out_len = make_fusnet13_frames_original_style(
         mB=mB_gpu,
         mA=mA_gpu,
         context=context,
@@ -379,32 +491,7 @@ def main():
     print(f"Signal length: {T}")
 
     # --------------------------------------------------------
-    # Baseline FuSNet
-    # --------------------------------------------------------
-
-    print("\n[3] Loading baseline FuSNet model...")
-
-    baseline_model, _ = load_fusnet13_model(
-        checkpoint_path=checkpoint_path,
-        context=context,
-        device=str(device),
-    )
-
-    baseline_model.to(device)
-
-    print("\n[4] Running baseline FuSNet...")
-
-    mA_fusnet = run_baseline_fusnet(
-        model=baseline_model,
-        frames_x=frames_x,
-        starts=starts,
-        T=T,
-        qa=5,
-        device=device,
-    )
-
-    # --------------------------------------------------------
-    # Adaptive FuSNet model
+    # Load adaptive model
     # --------------------------------------------------------
 
     print("\n[5] Loading adaptive FuSNet model...")
@@ -416,15 +503,16 @@ def main():
     )
 
     model.to(device)
+    model.eval()
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total trainable FuSNet parameters to update: {total_params}")
 
     # --------------------------------------------------------
-    # Kalman update
+    # Run Kalman parameter adaptation
     # --------------------------------------------------------
 
-    print("\n[6] Running GPU parameter Kalman update...")
+    print("\n[6] Running corrected GPU parameter Kalman update...")
 
     if mode.lower() == "full":
         updater = FullGPUFUSENetParameterKalman(
@@ -480,20 +568,18 @@ def main():
     # Metrics
     # --------------------------------------------------------
 
-    mA_np = mA_cpu[:, :T].cpu().numpy()
-
-    print_metrics(mA_np, mA_fusnet, "Baseline FuSNet")
-    print_metrics(mA_np, mA_hat, "FuSNet after GPU parameter Kalman")
+    print_metrics(mA_np, mA_fusnet, "Baseline FuSNet original-style inference")
+    print_metrics(mA_np, mA_hat, "FuSNet after corrected GPU parameter Kalman")
 
     # --------------------------------------------------------
-    # Save
+    # Save outputs
     # --------------------------------------------------------
 
     print("\n[7] Saving outputs...")
 
     np.save(out_dir / "mA_target.npy", mA_np)
-    np.save(out_dir / "mB_input.npy", mB_cpu[:, :T].cpu().numpy())
-    np.save(out_dir / "mA_fusnet_baseline.npy", mA_fusnet)
+    np.save(out_dir / "mB_input.npy", mB_cpu[:, :T].numpy())
+    np.save(out_dir / "mA_fusnet_baseline_original_style.npy", mA_fusnet)
     np.save(out_dir / "mA_after_gpu_parameter_kalman.npy", mA_hat)
     np.save(out_dir / "error_trace_rms.npy", error_trace)
 
@@ -529,7 +615,7 @@ def main():
         torch.save(
             {
                 "model_state_dict": model.state_dict(),
-                "architecture": "FuSNet13 full-parameter GPU Kalman adapted",
+                "architecture": "FuSNet13 corrected full-parameter GPU Kalman adapted",
                 "mode": mode,
                 "context": context,
                 "filter_length": filter_length,
@@ -544,26 +630,26 @@ def main():
                     "kalman_block_frames": kalman_block_frames,
                 },
             },
-            out_dir / "adapted_fusnet_gpu_parameter_kalman.pth",
+            out_dir / "adapted_fusnet_gpu_parameter_kalman_corrected.pth",
         )
 
     # Save wav files
     for ch in range(5):
         torchaudio.save(
             str(out_dir / f"target_mic_{ch+1}.wav"),
-            torch.from_numpy(mA_np[ch:ch+1]).float(),
+            torch.from_numpy(mA_np[ch:ch + 1]).float(),
             fs,
         )
 
         torchaudio.save(
             str(out_dir / f"baseline_fusnet_mic_{ch+1}.wav"),
-            torch.from_numpy(mA_fusnet[ch:ch+1]).float(),
+            torch.from_numpy(mA_fusnet[ch:ch + 1]).float(),
             fs,
         )
 
         torchaudio.save(
             str(out_dir / f"after_gpu_param_kalman_mic_{ch+1}.wav"),
-            torch.from_numpy(mA_hat[ch:ch+1]).float(),
+            torch.from_numpy(mA_hat[ch:ch + 1]).float(),
             fs,
         )
 

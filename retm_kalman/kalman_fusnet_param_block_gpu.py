@@ -8,14 +8,13 @@ import torch.nn as nn
 
 class BlockGPUFUSENetParameterKalman:
     """
-    GPU block diagonal Kalman-style adaptation of ALL FuSNet parameters.
+    GPU block parameter Kalman-style adaptation of ALL FuSNet parameters.
 
-    Block version:
-        - Prediction is done once per block.
+    Difference from full-frame version:
         - Several FuSNet frames are processed as a mini-batch.
-        - One Kalman-style parameter update is done using the average block loss.
+        - One prediction and one parameter update are performed per block.
 
-    This is faster and usually more stable than updating every frame.
+    This is faster and usually more stable than updating after every frame.
     """
 
     def __init__(
@@ -63,6 +62,10 @@ class BlockGPUFUSENetParameterKalman:
 
     @torch.no_grad()
     def predict_parameters(self):
+        """
+        Predict all FuSNet parameters once per block.
+        """
+
         for name, p in self.model.named_parameters():
             if not p.requires_grad:
                 continue
@@ -76,6 +79,10 @@ class BlockGPUFUSENetParameterKalman:
             self.P[name].mul_(self.G ** 2).add_(self.Q)
 
     def update_from_loss(self, loss: torch.Tensor):
+        """
+        Update all FuSNet parameters from one block loss.
+        """
+
         self.model.zero_grad(set_to_none=True)
 
         loss.backward()
@@ -108,15 +115,16 @@ class BlockGPUFUSENetParameterKalman:
 
     def step_block(self, x_block: torch.Tensor, d_block: torch.Tensor):
         """
-        One block Kalman-style update.
+        One block Kalman-style parameter update.
 
         Args:
             x_block: [B, 8, window_size]
             d_block: [B, 5, output_length]
 
         Returns:
-            y_hat, error, loss
+            y_hat, error, loss_value
         """
+
         self.predict_parameters()
 
         y_hat = self.model(x_block)
