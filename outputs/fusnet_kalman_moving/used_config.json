@@ -31,12 +31,14 @@
     "window_size": 16384,
     "stride": 8192,
     "batch_size": 8,
-    "device": "cuda"
+    "device": "cuda",
+    "start_offset": 0,
+    "force_extract": false
   },
   "kalman": {
     "mode": "block",
-    "L": 131072,
-    "block_size": 256,
+    "L": 16384,
+    "block_size": 64,
     "transition": 0.995,
     "process_noise": 1e-07,
     "observation_noise": 0.001,
