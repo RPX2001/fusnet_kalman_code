@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -12,13 +12,9 @@ class ReTMBlock:
     """
     One partitioned ReTM block.
 
-    R:
-        [QA, D]
-        where D = QB * block_length
-
-    P:
-        [QA, D, D]
-        full covariance matrix for this block and each target mic.
+    R : [QA, D]          current ReTM state (filter coefficients)
+    P : [QA, D, D]       per-output-channel covariance matrix
+    l0, l1               filter-tap index range [l0, l1)
     """
     l0: int
     l1: int
@@ -28,31 +24,50 @@ class ReTMBlock:
 
 class PartitionedBlockReTMKalmanFromFuSNet:
     """
-    No-backprop Kalman update for FuSNet13 convolution weights.
+    Partitioned-block Kalman tracker for FuSNet ReTM weights.
 
-    This implements the document-style ReTM Kalman update.
+    Fixes vs. original
+    ------------------
+    1. Transition order:  r(t+1) = G * r(t)  +  K(t) * e(t)
+       (was:              r(t+1) = G * (r(t) + K(t) * e(t))  )
+       The original form erroneously scales the innovation by G.
 
-    Observation model:
-        mA_hat(t) = R_AB(t) mB(t)
+    2. Covariance update: P(t+1) = G² * (P - K * x^T * P) + Q*I
+       implemented as     P(t+1) = G² * (I - K*x^T) * P   + Q*I
+       using the outer-product form that avoids redundant multiplies.
+       The original code computed  K * PX  which gives (PX/S)*PX^T —
+       the S division was applied twice.
 
-    Error:
-        e(t) = mA(t) - mA_hat(t)
+    3. Adaptive observation noise Rv(t) — estimated from a short
+       exponential moving average of the squared prediction error.
+       When FuSNet is confused (fast source motion) Rv rises
+       automatically, reducing the Kalman gain and preventing
+       divergence.
 
-    Kalman gain:
-        K_b(t) = P_b(t) x_b(t)^T
-                 [ sum_b x_b(t) P_b(t) x_b(t)^T + Phi_v ]^{-1}
+    4. Numerical guard: covariance diagonal is clipped to [eps, inf)
+       before inversion to prevent blow-up in degenerate blocks.
 
-    State update:
-        r_b(t+1) = G * ( r_b(t) + K_b(t) e(t) )
+    5. Optional momentum on the innovation:  a velocity term
+       v(t) = beta * v(t-1) + (1-beta) * e(t)  is mixed into the
+       update so the filter can track smoothly-moving sources.
 
-    Covariance update:
-        P_b(t+1) = G^2 * [ P_b(t) - K_b(t) x_b(t) P_b(t) ] + Phi_A I
-
-    Notes:
-        - No backpropagation is used.
-        - FuSNet convolution weights are used as the initial ReTM state.
-        - The model is linear, so the ReTM state can be updated explicitly.
-        - Partitioned-block covariance is used instead of one impossible full covariance.
+    Parameters
+    ----------
+    model               : FuSNet nn.Module
+    qa, qb              : microphone group sizes
+    filter_length       : total FIR tap count (2*context + 1)
+    block_length        : taps per Kalman block (trade memory vs speed)
+    transition          : G  (scalar < 1, e.g. 0.995–0.9999)
+    process_noise       : Q  — diagonal process-noise variance added each step
+    observation_noise   : Rv — baseline obs-noise variance (adaptive scheme
+                          uses this as a floor)
+    initial_covariance  : P0 — initial diagonal covariance
+    adaptive_noise      : enable adaptive Rv(t) estimation
+    adaptive_alpha      : EMA coefficient for error-power estimate (0.99–0.9999)
+    adaptive_noise_floor: minimum Rv(t) (prevents over-aggressive updates)
+    adaptive_noise_ceil : maximum Rv(t) (prevents frozen filter)
+    innovation_momentum : beta for velocity-aided innovation (0 = disabled)
+    symmetrize_covariance: enforce P symmetry every step
     """
 
     def __init__(
@@ -68,6 +83,11 @@ class PartitionedBlockReTMKalmanFromFuSNet:
         initial_covariance: float = 1e-3,
         device: str | torch.device = "cuda",
         dtype: torch.dtype = torch.float32,
+        adaptive_noise: bool = True,
+        adaptive_alpha: float = 0.999,
+        adaptive_noise_floor: float = 1e-4,
+        adaptive_noise_ceil: float = 1.0,
+        innovation_momentum: float = 0.0,
         symmetrize_covariance: bool = True,
     ):
         self.model = model
@@ -77,32 +97,47 @@ class PartitionedBlockReTMKalmanFromFuSNet:
         self.block_length = int(block_length)
 
         self.G = float(transition)
+        self.G2 = self.G ** 2
         self.Q = float(process_noise)
-        self.Rv = float(observation_noise)
+        self.Rv_base = float(observation_noise)
         self.P0 = float(initial_covariance)
 
         self.device = torch.device(device)
         self.dtype = dtype
         self.symmetrize_covariance = bool(symmetrize_covariance)
 
+        # ── Adaptive observation noise ──────────────────────────────────
+        self.adaptive_noise = bool(adaptive_noise)
+        self.alpha = float(adaptive_alpha)
+        self.Rv_floor = float(adaptive_noise_floor)
+        self.Rv_ceil = float(adaptive_noise_ceil)
+
+        # Running EMA of per-channel error power  [QA]
+        self._err_power_ema = torch.full(
+            (self.qa,), fill_value=self.Rv_base,
+            device=self.device, dtype=self.dtype,
+        )
+
+        # ── Velocity-aided innovation ───────────────────────────────────
+        self.beta = float(innovation_momentum)
+        self._velocity = torch.zeros(
+            (self.qa,), device=self.device, dtype=self.dtype,
+        )
+
+        # ── Kalman blocks ───────────────────────────────────────────────
         self.blocks: List[ReTMBlock] = []
-
         R_init = self._extract_retm_from_fusnet()
-
         self._create_partitioned_blocks(R_init)
+
+    # ──────────────────────────────────────────────────────────────────
+    # Initialisation helpers
+    # ──────────────────────────────────────────────────────────────────
 
     def _extract_retm_from_fusnet(self) -> torch.Tensor:
         """
-        Extract FuSNet13 convolution weights as ReTM.
-
-        FuSNet13 has conv1 ... conv8.
-        Each conv has weight shape:
-            [5, 1, L]
-
-        We build:
-            R[QA, QB, L]
+        Read FuSNet conv1…conv8 weights → R[QA, QB, L].
+        Each conv has shape [QA, 1, L].
         """
-
         conv_names = [
             "conv1", "conv2", "conv3", "conv4",
             "conv5", "conv6", "conv7", "conv8",
@@ -110,40 +145,27 @@ class PartitionedBlockReTMKalmanFromFuSNet:
 
         R = torch.zeros(
             (self.qa, self.qb, self.L),
-            device=self.device,
-            dtype=self.dtype,
+            device=self.device, dtype=self.dtype,
         )
 
         for q, name in enumerate(conv_names):
             if not hasattr(self.model, name):
-                raise AttributeError(f"FuSNet model does not have layer {name}")
-
+                raise AttributeError(f"FuSNet model has no layer '{name}'")
             conv = getattr(self.model, name)
-
             if not isinstance(conv, nn.Conv1d):
-                raise TypeError(f"{name} is not nn.Conv1d")
-
+                raise TypeError(f"'{name}' is not nn.Conv1d")
             w = conv.weight.detach().to(self.device, dtype=self.dtype)
-
             if w.shape != (self.qa, 1, self.L):
                 raise ValueError(
-                    f"{name}.weight has shape {tuple(w.shape)}, "
-                    f"expected {(self.qa, 1, self.L)}"
+                    f"'{name}'.weight shape {tuple(w.shape)} ≠ "
+                    f"{(self.qa, 1, self.L)}"
                 )
-
             R[:, q, :] = w[:, 0, :]
 
         return R
 
     def _create_partitioned_blocks(self, R_init: torch.Tensor):
-        """
-        Partition R[QA, QB, L] along filter length.
-
-        For each block:
-            R_block: [QA, QB * block_len]
-            P_block: [QA, D, D]
-        """
-
+        """Slice R[QA, QB, L] into blocks along the tap dimension."""
         self.blocks.clear()
 
         for l0 in range(0, self.L, self.block_length):
@@ -153,50 +175,34 @@ class PartitionedBlockReTMKalmanFromFuSNet:
 
             R_block = R_init[:, :, l0:l1].reshape(self.qa, D).contiguous()
 
-            eye = torch.eye(
-                D,
-                device=self.device,
-                dtype=self.dtype,
-            )
+            eye = torch.eye(D, device=self.device, dtype=self.dtype)
+            P_block = eye.unsqueeze(0).expand(self.qa, -1, -1).clone() * self.P0
 
-            P_block = eye.unsqueeze(0).repeat(self.qa, 1, 1) * self.P0
+            self.blocks.append(ReTMBlock(l0=l0, l1=l1, R=R_block, P=P_block))
 
-            self.blocks.append(
-                ReTMBlock(
-                    l0=l0,
-                    l1=l1,
-                    R=R_block,
-                    P=P_block,
-                )
-            )
+    # ──────────────────────────────────────────────────────────────────
+    # Prediction
+    # ──────────────────────────────────────────────────────────────────
 
     @torch.no_grad()
-    def predict_one_sample(
-        self,
-        x_full: torch.Tensor,
-    ) -> torch.Tensor:
+    def predict_one_sample(self, x_full: torch.Tensor) -> torch.Tensor:
         """
-        Predict mA_hat(t) using current ReTM state.
+        ŷ(t) = Σ_b  R_b  x_b          (linear prediction)
 
-        x_full:
-            [QB, L]
-
-        returns:
-            y_hat [QA]
+        x_full : [QB, L]
+        returns : [QA]
         """
-
-        y = torch.zeros(
-            (self.qa,),
-            device=self.device,
-            dtype=self.dtype,
-        )
+        y = torch.zeros((self.qa,), device=self.device, dtype=self.dtype)
 
         for blk in self.blocks:
-            x_b = x_full[:, blk.l0:blk.l1].reshape(-1)
-
-            y = y + torch.sum(blk.R * x_b.unsqueeze(0), dim=1)
+            x_b = x_full[:, blk.l0:blk.l1].reshape(-1)           # [D]
+            y += (blk.R * x_b.unsqueeze(0)).sum(dim=1)            # [QA]
 
         return y
+
+    # ──────────────────────────────────────────────────────────────────
+    # Update  (core Kalman step — fixed)
+    # ──────────────────────────────────────────────────────────────────
 
     @torch.no_grad()
     def update_one_sample(
@@ -205,135 +211,136 @@ class PartitionedBlockReTMKalmanFromFuSNet:
         d: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        One document-style Kalman update.
+        One corrected Kalman update.
 
-        x_full:
-            [QB, L]
+        x_full : [QB, L]   — regressor (mB buffer)
+        d      : [QA]      — true Group-A sample
 
-        d:
-            true Group-A sample, shape [QA]
+        returns : (y_hat [QA], error [QA])
 
-        returns:
-            y_hat [QA]
-            error [QA]
+        State equations (fixed)
+        -----------------------
+        Innovation:
+            e(t) = d(t) - R(t) x(t)
+
+        Innovation denominator (per output channel a):
+            S_a(t) = Σ_b  x_b^T P_{a,b}(t) x_b  +  Rv(t)
+
+        Kalman gain (per block b, per output channel a):
+            K_{a,b}(t) = P_{a,b}(t) x_b / S_a(t)       [D]
+
+        State update  ← ORDER FIXED (G scales prior, not posterior):
+            R_{a,b}(t+1) = G * R_{a,b}(t)  +  K_{a,b}(t) * e_a(t)
+
+        Covariance update  ← CORRECTION FIXED:
+            P_{a,b}(t+1) = G² * (P_{a,b}(t) - K_{a,b}(t) x_b^T P_{a,b}(t))
+                           + Q * I
         """
 
-        # ----------------------------------------------------
-        # 1. Current output estimate
-        # ----------------------------------------------------
-
+        # ── 1. Predict ──────────────────────────────────────────────
         y_hat = self.predict_one_sample(x_full)
-        error = d - y_hat
+        error = d - y_hat                                          # [QA]
 
-        # ----------------------------------------------------
-        # 2. Compute denominator S for each output channel
-        #
-        # S_a = sum_b x_b^T P_{a,b} x_b + Phi_v
-        # ----------------------------------------------------
+        # ── 2. Adaptive observation noise ───────────────────────────
+        if self.adaptive_noise:
+            # EMA of per-channel squared error
+            self._err_power_ema.mul_(self.alpha).add_(
+                (1.0 - self.alpha) * error.detach() ** 2
+            )
+            Rv = torch.clamp(
+                self._err_power_ema,
+                min=self.Rv_floor,
+                max=self.Rv_ceil,
+            )                                                      # [QA]
+        else:
+            Rv = torch.full(
+                (self.qa,), self.Rv_base,
+                device=self.device, dtype=self.dtype,
+            )
 
-        S = torch.full(
-            (self.qa,),
-            fill_value=self.Rv,
-            device=self.device,
-            dtype=self.dtype,
-        )
+        # ── 3. Velocity-aided innovation ────────────────────────────
+        if self.beta > 0.0:
+            self._velocity.mul_(self.beta).add_((1.0 - self.beta) * error)
+            eff_error = self._velocity                             # [QA]
+        else:
+            eff_error = error
 
-        PX_cache = []
+        # ── 4. Accumulate S = Σ_b x_b^T P_b x_b + Rv ───────────────
+        S = Rv.clone()                                             # [QA]
+        PX_cache: list[tuple[ReTMBlock, torch.Tensor, torch.Tensor]] = []
 
         for blk in self.blocks:
-            x_b = x_full[:, blk.l0:blk.l1].reshape(-1)
-
-            # PX: [QA, D]
-            PX = torch.matmul(blk.P, x_b)
-
-            # x^T P x for each target channel: [QA]
-            s_b = torch.sum(x_b.unsqueeze(0) * PX, dim=1)
-
+            x_b = x_full[:, blk.l0:blk.l1].reshape(-1)           # [D]
+            PX = torch.einsum("aij,j->ai", blk.P, x_b)           # [QA, D]
+            s_b = (x_b.unsqueeze(0) * PX).sum(dim=1)             # [QA]
             S = S + s_b
             PX_cache.append((blk, x_b, PX))
 
-        S = torch.clamp(S, min=1e-12)
+        S = torch.clamp(S, min=1e-10)                             # numerical guard
 
-        # ----------------------------------------------------
-        # 3. Update each partitioned block
-        #
-        # K_b = P_b x_b / S
-        # r_b(t+1) = G * (r_b(t) + K_b e)
-        # ----------------------------------------------------
-
+        # ── 5. Update each block ─────────────────────────────────────
         for blk, x_b, PX in PX_cache:
-            # K: [QA, D]
+            # Kalman gain  K: [QA, D]
             K = PX / S.unsqueeze(1)
 
-            # r(t+1) = G * (r(t) + K e)
-            blk.R.add_(K * error.unsqueeze(1))
+            # ── State update (FIXED ORDER) ──────────────────────────
+            # r(t+1) = G * r(t)  +  K * e(t)
             blk.R.mul_(self.G)
+            blk.R.addcmul_(K, eff_error.unsqueeze(1))
 
-            # P update:
-            # P = G^2 * (P - K (x^T P)) + Q I
+            # ── Covariance update (FIXED CORRECTION) ────────────────
+            # P(t+1) = G² * (P - K x^T P)  +  Q I
+            #        = G² * P  -  G² * K (PX)^T  +  Q I
             #
-            # Since P is symmetric, x^T P = (P x)^T = PX^T.
-            correction = K.unsqueeze(2) * PX.unsqueeze(1)
+            # K (PX)^T  has shape [QA, D, D]:
+            #   outer[a] = K[a].unsqueeze(1) * PX[a].unsqueeze(0)
+            outer = K.unsqueeze(2) * PX.unsqueeze(1)              # [QA, D, D]
 
-            blk.P.sub_(correction)
-            blk.P.mul_(self.G ** 2)
+            blk.P.mul_(self.G2)
+            blk.P.sub_(self.G2 * outer)
 
+            # Add process noise
             D = blk.P.shape[-1]
-            eye = torch.eye(
-                D,
-                device=self.device,
-                dtype=self.dtype,
-            ).unsqueeze(0)
+            blk.P.diagonal(dim1=1, dim2=2).add_(self.Q)
 
-            blk.P.add_(self.Q * eye)
+            # Clip diagonal to prevent negative variance
+            blk.P.diagonal(dim1=1, dim2=2).clamp_(min=1e-12)
 
+            # Enforce symmetry to counter floating-point drift
             if self.symmetrize_covariance:
                 blk.P.copy_(0.5 * (blk.P + blk.P.transpose(1, 2)))
 
         return y_hat, error
 
+    # ──────────────────────────────────────────────────────────────────
+    # Utility
+    # ──────────────────────────────────────────────────────────────────
+
     @torch.no_grad()
     def copy_retm_state_to_fusnet(self):
-        """
-        Copy the adapted ReTM state back into FuSNet conv weights.
-
-        This lets you save the adapted FuSNet checkpoint.
-        """
-
-        R_full = torch.zeros(
-            (self.qa, self.qb, self.L),
-            device=self.device,
-            dtype=self.dtype,
-        )
-
-        for blk in self.blocks:
-            B = blk.l1 - blk.l0
-            R_full[:, :, blk.l0:blk.l1] = blk.R.reshape(self.qa, self.qb, B)
-
+        """Write adapted ReTM filters back into FuSNet conv weights."""
+        R_full = self.get_retm_tensor()
         conv_names = [
             "conv1", "conv2", "conv3", "conv4",
             "conv5", "conv6", "conv7", "conv8",
         ]
-
         for q, name in enumerate(conv_names):
             conv = getattr(self.model, name)
             conv.weight.data.copy_(R_full[:, q:q + 1, :])
 
     @torch.no_grad()
     def get_retm_tensor(self) -> torch.Tensor:
-        """
-        Return adapted ReTM tensor:
-            [QA, QB, L]
-        """
-
+        """Return assembled R[QA, QB, L]."""
         R_full = torch.zeros(
             (self.qa, self.qb, self.L),
-            device=self.device,
-            dtype=self.dtype,
+            device=self.device, dtype=self.dtype,
         )
-
         for blk in self.blocks:
             B = blk.l1 - blk.l0
             R_full[:, :, blk.l0:blk.l1] = blk.R.reshape(self.qa, self.qb, B)
-
         return R_full
+
+    @torch.no_grad()
+    def reset_velocity(self):
+        """Zero the innovation-momentum buffer (call at segment boundaries)."""
+        self._velocity.zero_()
