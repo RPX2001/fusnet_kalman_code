@@ -1,0 +1,46 @@
+{
+  "method": "no_backprop_partitioned_retm_kalman_from_fusnet_weights",
+  "fs": 16000,
+  "num_samples": 100531,
+  "context": 4096,
+  "filter_length": 8193,
+  "window_size": 16384,
+  "stride": 8192,
+  "block_length": 64,
+  "transition_G": 0.995,
+  "process_noise": 1e-08,
+  "observation_noise": 0.01,
+  "initial_covariance": 0.001,
+  "update_stride": 1,
+  "total_retm_parameters": 327720,
+  "baseline_sdr_per_channel": [
+    -5.211219310760498,
+    -5.320987701416016,
+    -4.900609016418457,
+    -3.5839738845825195,
+    -0.6980757713317871
+  ],
+  "baseline_sdr_avg": -3.9429733753204346,
+  "kalman_sdr_per_channel": [
+    1.1106501817703247,
+    1.2248307466506958,
+    1.151732087135315,
+    1.383375644683838,
+    1.4960675239562988
+  ],
+  "kalman_sdr_avg": 1.2733312845230103,
+  "baseline_mse_db_per_channel": [
+    -24.177860260009766,
+    -23.19567108154297,
+    -23.57403564453125,
+    -23.145633697509766,
+    -16.317489624023438
+  ],
+  "kalman_mse_db_per_channel": [
+    -30.49972915649414,
+    -29.74148941040039,
+    -29.62637710571289,
+    -28.11298179626465,
+    -18.511632919311523
+  ]
+}
