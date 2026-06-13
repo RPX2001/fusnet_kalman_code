@@ -167,7 +167,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     fs_target     = 16000
-    qa_mics       = [1, 2, 3, 4, 5]
+    qa_mics       = [1, 2, 3, 5, 4]
     qb_mics       = [6, 7, 8, 9, 10, 11, 12, 13]
     context       = 4096
     filter_length = 2 * context + 1

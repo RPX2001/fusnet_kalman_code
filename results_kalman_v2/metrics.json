@@ -1,0 +1,32 @@
+{
+  "baseline_sdr_avg": -2.727691411972046,
+  "kalman_v2_sdr_avg": 6.322369575500488,
+  "baseline_mse_avg": -27.931610107421875,
+  "kalman_v2_mse_avg": -36.981666564941406,
+  "baseline_sdr_per_ch": [
+    -3.425651788711548,
+    -3.5682120323181152,
+    -3.2686233520507812,
+    -2.941983699798584,
+    -0.43398547172546387
+  ],
+  "kalman_v2_sdr_per_ch": [
+    7.7091827392578125,
+    7.598159313201904,
+    7.922609329223633,
+    7.534471035003662,
+    0.8474252223968506
+  ],
+  "settings": {
+    "block_length": 64,
+    "transition": 0.995,
+    "process_noise": 1e-07,
+    "observation_noise": 0.01,
+    "adaptive_noise": true,
+    "adaptive_alpha": 0.999,
+    "adaptive_noise_floor": 0.001,
+    "innovation_momentum": 0.3,
+    "channel_gain_alpha": 0.999,
+    "p_floor": 1e-10
+  }
+}
