@@ -17,7 +17,6 @@ from retm_kalman.kalman_fusnet_retm_partitioned_gpu import (
     PartitionedBlockReTMKalmanFromFuSNet,
 )
 
-
 SEED = 0
 random.seed(SEED)
 np.random.seed(SEED)
