@@ -157,17 +157,17 @@ def main():
 
     # ── Paths ──────────────────────────────────────────────────────────
     seq_dir = Path(
-        "/home/jaliya/eeg_speech/Julian/RetM_Workspace/Dataset/A2_rctd"
+        "/home/jaliya/eeg_speech/Julian/RetM_Workspace/Dataset/0.25/moving"
     )
     checkpoint_path = Path(
         "/home/jaliya/eeg_speech/Julian/RetM_Workspace/ReTM_Research_Project/"
         "best_checkpoint_A1_1_FUSENet_13_rctd.pth"
     )
-    out_dir = Path("results_fusnet_retm_kalman")
+    out_dir = Path("results_fusnet_retm_kalman_0.25")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     fs_target     = 16000
-    qa_mics       = [1, 2, 3, 5, 4]
+    qa_mics       = [1, 2, 3, 4, 5]
     qb_mics       = [6, 7, 8, 9, 10, 11, 12, 13]
     context       = 4096
     filter_length = 2 * context + 1

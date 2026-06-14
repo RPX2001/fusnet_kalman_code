@@ -1,0 +1,56 @@
+{
+  "baseline_sdr_avg": -2.727691411972046,
+  "v3_sdr_avg": 6.235627174377441,
+  "baseline_mse_avg": -27.931610107421875,
+  "v3_mse_avg": -36.894927978515625,
+  "per_ch": {
+    "ch1": {
+      "sdr_base": -3.425651788711548,
+      "sdr_v3": 7.70897102355957,
+      "mse_base": -29.63250732421875,
+      "mse_v3": -40.76713180541992
+    },
+    "ch2": {
+      "sdr_base": -3.5682120323181152,
+      "sdr_v3": 7.59818172454834,
+      "mse_base": -29.842012405395508,
+      "mse_v3": -41.00840759277344
+    },
+    "ch3": {
+      "sdr_base": -3.2686233520507812,
+      "sdr_v3": 7.921933650970459,
+      "mse_base": -27.935400009155273,
+      "mse_v3": -39.12596130371094
+    },
+    "ch4": {
+      "sdr_base": -2.941983699798584,
+      "sdr_v3": 7.53432559967041,
+      "mse_base": -30.60794448852539,
+      "mse_v3": -41.08425521850586
+    },
+    "ch5": {
+      "sdr_base": -0.43398547172546387,
+      "sdr_v3": 0.4147246479988098,
+      "mse_base": -21.64017677307129,
+      "mse_v3": -22.48888397216797
+    }
+  },
+  "config": {
+    "block_length": 64,
+    "transition": 0.995,
+    "process_noise": 1e-07,
+    "observation_noise": 0.01,
+    "initial_covariance": 0.001,
+    "adaptive_noise": true,
+    "adaptive_alpha": 0.999,
+    "adaptive_noise_floor": 0.001,
+    "adaptive_noise_ceil": 1.0,
+    "innovation_momentum": 0.3,
+    "channel_gain_alpha": 0.999,
+    "p_floor": 1e-10,
+    "norm_margin": 3.0,
+    "gain_floor": 0.0001,
+    "null_power_threshold": 0.05,
+    "null_ema_alpha": 0.999
+  }
+}
