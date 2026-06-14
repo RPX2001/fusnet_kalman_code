@@ -1,0 +1,32 @@
+{
+  "fs": 16000,
+  "num_samples": 201062,
+  "context": 4096,
+  "filter_length": 8193,
+  "block_length": 64,
+  "transition_G": 0.995,
+  "process_noise": 1e-07,
+  "observation_noise": 0.01,
+  "adaptive_noise": true,
+  "adaptive_alpha": 0.999,
+  "innovation_momentum": 0.3,
+  "update_stride": 1,
+  "baseline_sdr_avg": -0.5624426603317261,
+  "kalman_sdr_avg": 11.5975980758667,
+  "baseline_mse_avg": -22.939861297607422,
+  "kalman_mse_avg": -35.09989929199219,
+  "baseline_sdr_per_ch": [
+    -0.050387512892484665,
+    -1.357846975326538,
+    0.7365069389343262,
+    -1.299020767211914,
+    -0.8414652347564697
+  ],
+  "kalman_sdr_per_ch": [
+    12.338994979858398,
+    11.882017135620117,
+    13.391786575317383,
+    11.093249320983887,
+    9.281941413879395
+  ]
+}
