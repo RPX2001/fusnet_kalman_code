@@ -21,7 +21,6 @@ class ReTMBlock:
     R: torch.Tensor
     P: torch.Tensor
 
-
 class PartitionedBlockReTMKalmanFromFuSNet:
     """
     Partitioned-block Kalman tracker for FuSNet ReTM weights.
