@@ -1,0 +1,32 @@
+{
+  "fusnet_baseline": {
+    "label": "FuSNet baseline",
+    "num_mics": 5,
+    "num_samples": 201062,
+    "num_frequency_bins": 513,
+    "num_time_frames": 786,
+    "num_evaluated_tf_bins": 341528,
+    "covsim_mean": 0.2488413346507979,
+    "covsim_median": 0.18606655299663544,
+    "covsim_std": 0.21841865738365523,
+    "covsim_min": 4.643355850930675e-07,
+    "covsim_max": 0.9999353885650635
+  },
+  "fusnet_kalman": {
+    "label": "FuSNet + Kalman",
+    "num_mics": 5,
+    "num_samples": 201062,
+    "num_frequency_bins": 513,
+    "num_time_frames": 786,
+    "num_evaluated_tf_bins": 341528,
+    "covsim_mean": 0.9898673617656392,
+    "covsim_median": 0.9998443722724915,
+    "covsim_std": 0.06574984850593439,
+    "covsim_min": 1.1143153244574933e-07,
+    "covsim_max": 1.0000001192092896
+  },
+  "improvement": {
+    "delta_covsim_mean": 0.7410260271148412,
+    "delta_covsim_median": 0.813777819275856
+  }
+}
