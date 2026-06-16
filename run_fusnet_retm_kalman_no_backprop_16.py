@@ -137,13 +137,13 @@ def run_retm_kalman_samplewise(
 
 def main():
     seq_dir = Path(
-        "/home/jaliya/eeg_speech/Julian/RetM_Workspace/Dataset/Dataset_Folder2/Moving/L/1"
+        "/home/jaliya/eeg_speech/Julian/RetM_Workspace/Dataset/Dataset_Folder2/Moving/N/1"
     )
     checkpoint_path = Path(
         "/home/jaliya/eeg_speech/Julian/RetM_Workspace/ReTM_Research_Project/"
-        "best_checkpoint_A1_1_FUSENet_16_L.pth"
+        "best_checkpoint_A1_1_FUSENet_16_N.pth"
     )
-    out_dir = Path("results_fusnet_retm_kalman_L_1_16")
+    out_dir = Path("results_fusnet_retm_kalman_N_1_16")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     fs_target = 16000
