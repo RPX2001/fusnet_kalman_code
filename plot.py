@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 # ============================================================
 
 # This should match the output folder in your Kalman run code
-RESULT_DIR = Path("results_fusnet_retm_kalman_I_1")
+RESULT_DIR = Path("results_fusnet_retm_kalman_J_1")
 
 # Figure output folder
 FIG_DIR = RESULT_DIR / "plots_target_kalman"
