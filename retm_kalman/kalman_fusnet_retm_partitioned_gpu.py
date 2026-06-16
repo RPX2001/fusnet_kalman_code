@@ -134,13 +134,10 @@ class PartitionedBlockReTMKalmanFromFuSNet:
 
     def _extract_retm_from_fusnet(self) -> torch.Tensor:
         """
-        Read FuSNet conv1…conv8 weights → R[QA, QB, L].
+        Read FuSNet conv1…conv{QB} weights → R[QA, QB, L].
         Each conv has shape [QA, 1, L].
         """
-        conv_names = [
-            "conv1", "conv2", "conv3", "conv4",
-            "conv5", "conv6", "conv7", "conv8",
-        ]
+        conv_names = [f"conv{i}" for i in range(1, self.qb + 1)]
 
         R = torch.zeros(
             (self.qa, self.qb, self.L),
@@ -319,10 +316,7 @@ class PartitionedBlockReTMKalmanFromFuSNet:
     def copy_retm_state_to_fusnet(self):
         """Write adapted ReTM filters back into FuSNet conv weights."""
         R_full = self.get_retm_tensor()
-        conv_names = [
-            "conv1", "conv2", "conv3", "conv4",
-            "conv5", "conv6", "conv7", "conv8",
-        ]
+        conv_names = [f"conv{i}" for i in range(1, self.qb + 1)]
         for q, name in enumerate(conv_names):
             conv = getattr(self.model, name)
             conv.weight.data.copy_(R_full[:, q:q + 1, :])
