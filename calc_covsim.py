@@ -11,7 +11,7 @@ import torch
 # USER SETTINGS
 # ============================================================
 
-RESULT_DIR = Path("results_fusnet_retm_kalman_N_1_16")
+RESULT_DIR = Path("results_fusnet_retm_kalman_P_0.5_16")
 
 TARGET_FILE = RESULT_DIR / "mA_target.npy"
 BASELINE_FILE = RESULT_DIR / "mA_fusnet_baseline.npy"
