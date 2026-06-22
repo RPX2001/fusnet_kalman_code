@@ -13,8 +13,8 @@ from retm_kalman.fusnet_inference_16 import (
     load_fusnet16_model,
     predict_fusnet16_original_style,
 )
-from retm_kalman.kalman_fusnet_retm_partitioned_gpu import (
-    PartitionedBlockReTMKalmanFromFuSNet,
+from retm_kalman.kalman_filter import (
+    ReTMKalmanFilterFromFuSNet,
 )
 
 SEED = 0
@@ -215,8 +215,8 @@ def main():
 
     print_metrics(mA_np, mA_fusnet, "Baseline FuSNet")
 
-    print("\n[3] Initialising partitioned Kalman from FuSNet weights...")
-    kalman = PartitionedBlockReTMKalmanFromFuSNet(
+    print("\n[3] Initialising Kalman filter from FuSNet weights...")
+    kalman = ReTMKalmanFilterFromFuSNet(
         model=model,
         qa=7, qb=9,
         filter_length=filter_length,

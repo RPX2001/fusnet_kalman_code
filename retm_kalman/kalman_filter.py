@@ -10,7 +10,7 @@ import torch.nn as nn
 @dataclass
 class ReTMBlock:
     """
-    One partitioned ReTM block.
+    One ReTM Kalman block.
 
     R : [QA, D]          current ReTM state (filter coefficients)
     P : [QA, D, D]       per-output-channel covariance matrix
@@ -21,9 +21,9 @@ class ReTMBlock:
     R: torch.Tensor
     P: torch.Tensor
 
-class PartitionedBlockReTMKalmanFromFuSNet:
+class ReTMKalmanFilterFromFuSNet:
     """
-    Partitioned-block Kalman tracker for FuSNet ReTM weights.
+    Kalman filter tracker for FuSNet ReTM weights.
 
     Fixes vs. original
     ------------------
@@ -126,7 +126,7 @@ class PartitionedBlockReTMKalmanFromFuSNet:
         # ── Kalman blocks ───────────────────────────────────────────────
         self.blocks: List[ReTMBlock] = []
         R_init = self._extract_retm_from_fusnet()
-        self._create_partitioned_blocks(R_init)
+        self._create_kalman_blocks(R_init)
 
     # ──────────────────────────────────────────────────────────────────
     # Initialisation helpers
@@ -160,7 +160,7 @@ class PartitionedBlockReTMKalmanFromFuSNet:
 
         return R
 
-    def _create_partitioned_blocks(self, R_init: torch.Tensor):
+    def _create_kalman_blocks(self, R_init: torch.Tensor):
         """Slice R[QA, QB, L] into blocks along the tap dimension."""
         self.blocks.clear()
 
